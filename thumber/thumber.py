@@ -22,6 +22,11 @@ except ImportError:
     except ImportError:
         pyffmpeg = None
 
+try:
+    import PythonMagick as magick
+except ImportError:
+    magick = None
+
 INDEX_VERSION = 1
 MAX_PIXELS = 100 * 1024 * 1024 # 100 megapixels
 MAX_DIMENSION = 15000 # max dimension
@@ -31,7 +36,9 @@ class ThumberError(Exception):
 
 class Thumber(object):
     """Thumber librarys main class, use this if you want to use everything"""
-    def __init__(self, thumbnail_sizes = None, reserved_keys = None, file_types = None, pyffmpeg_enabled = False):
+    def __init__(self, thumbnail_sizes = None, reserved_keys = None, file_types = None,
+                 magick_enabled = False, pyffmpeg_enabled = False):
+        self.magick_enabled = magick_enabled
         self.pyffmpeg_enabled = pyffmpeg_enabled
         if thumbnail_sizes:
             self.thumbnail_sizes = thumbnail_sizes
@@ -59,21 +66,45 @@ class Thumber(object):
         result_dict = self.create_thumbnails(input_data)
         return self.thumb_indexer.create_thumbnail_blob_with_index(result_dict, extra_keys_dict = extra_keys_dict)
 
+    def __open_pil(self, file_or_data, tried):
+        try:
+            tried.append("PIL")
+            return Image.open(file_or_data)
+        except IOError:
+            pass
+
+    def __open_magick(self, filename, tried):
+        try:
+            tried.append("ImageMagick")
+            img = magick.Image(filename)
+            blob = magick.Blob()
+            img.write(blob, "PNG")
+            sio = StringIO(blob.data)
+            return Image.open(sio)
+        except RuntimeError:
+            pass
+
+    def __open_ffmpeg(self, filename, tried):
+        try:
+            tried.append("FFMPEG")
+            s = pyffmpeg.VideoStream()
+            s.open(filename)
+            return s.GetFrameNo(0)
+        except:
+            pass
+
     def create_thumbnails(self, input_data):
         """Create required thumbnails, sizes are set in object instance creation time"""
-        # Try to load the image w/ PIL and PyFFMPEG
-        try:
-            orig_image = Image.open(input_data)
-        except:
-            if not (self.pyffmpeg_enabled and pyffmpeg):
-                raise ThumberError("Could not open image with PIL")
-
-            try:
-                s = pyffmpeg.VideoStream()
-                s.open(input_data)
-                orig_image = s.GetFrameNo(0)
-            except:
-                raise ThumberError("Could not open image with PIL or PyFFMPEG")
+        # Try to load the image w/ PIL, ImageMagick and FFMPEG
+        tried = []
+        orig_image = self.__open_pil(input_data, tried)
+        if not orig_image and isinstance(input_data, basestring):
+            if magick and self.magick_enabled and not orig_image:
+                orig_image = self.__open_magick(input_data, tried)
+            if pyffmpeg and self.pyffmpeg_enabled and not orig_image:
+                orig_image = self.__open_magick(input_data, tried)
+        if not orig_image:
+            raise ThumberError("Could not open image with %r" % (tried, ))
 
         # Don't even try to resize too big images
         if orig_image.size[0] > MAX_DIMENSION or orig_image.size[1] > MAX_DIMENSION:
@@ -190,7 +221,7 @@ def main():
     if len(sys.argv) < 4:
         help_msg()
         sys.exit(1)
-    a = Thumber()
+    a = Thumber(magick_enabled = True)
     if sys.argv[1] == "store":
         data_blob = a.create_thumbs_and_index(file_path = sys.argv[2])
         output_filename = sys.argv[3]
